@@ -243,7 +243,14 @@ private enum TextPath {
     }
 
     static func analyze(description: String) async throws -> GeminiService.FoodAnalysis {
-        let session = LanguageModelSession(instructions: Self.systemInstructions())
+        // Attach the USDA tool whenever the bundled database is present. When it isn't,
+        // we still pass the tool — it self-reports unavailability to the model — but it's
+        // a no-op cost. Sending an empty tool list when missing skips the model's tool-call
+        // overhead entirely; preferred path here is "tool always present, sometimes empty".
+        let session = LanguageModelSession(
+            tools: [USDANutritionTool()],
+            instructions: Self.systemInstructions()
+        )
         do {
             let response = try await session.respond(
                 to: prompt(description: description),
@@ -258,10 +265,14 @@ private enum TextPath {
     /// Builds the system instruction prepended to every text-path session. Always includes
     /// the nutrition coach framing; appends the user's free-form `userContext` from
     /// Settings when set (matches the cloud tier's behaviour at AIProvider.swift's
-    /// system-instruction injection points).
+    /// system-instruction injection points). Phase 2 adds tool-usage guidance — without
+    /// explicit instructions, small models tend to call the USDA tool too often or not
+    /// at all, so the framing is deliberately prescriptive about *when* to invoke it.
     private static func systemInstructions() -> String {
         let base = """
         You are a nutrition expert helping a calorie tracking app. Estimate nutritional content for the food the user describes. Use ranges typical of the portion size implied by the description. If a brand name is given, use that brand's known values. If multiple items are described, sum their totals. Round whole-gram macros to the nearest gram. Use the units stated in each field's description (grams vs. milligrams).
+
+        When the user describes a single common food (raw or minimally prepared, no brand), call the lookup_usda_nutrition tool with the simplest form of the food name and the portion in grams if known. Use the values returned verbatim — do not adjust them. Skip the tool for branded composite meals (e.g. restaurant items) since USDA doesn't cover them; estimate those from your own knowledge.
         """
         if let userContext = AIProviderSettings.currentUserContext {
             return base + "\n\nAdditional user context (apply when relevant):\n" + userContext
