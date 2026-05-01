@@ -162,7 +162,39 @@ struct GeminiService {
     }
 
     static func analyzeNutritionLabel(image: UIImage) async throws -> NutritionLabelAnalysis {
-        let prompt = """
+        // On-device path: Vision (`VNRecognizeTextRequest`) extracts text, then a
+        // FoundationModels session with a @Generable label schema parses it. Two-stage
+        // because the system model accepts text more reliably than label imagery — and
+        // Vision OCR is already the highest-accuracy text extractor on the platform.
+        if AIProviderSettings.selectedProvider == .foundationModels {
+            do {
+                return try await FoundationModelsService.analyzeNutritionLabel(image: image)
+            } catch {
+                guard let fallback = AIProviderSettings.currentFallbackConfig(excludingPrimary: .foundationModels) else {
+                    throw error
+                }
+                guard let imageData = image.jpegData(compressionQuality: 0.8) else {
+                    throw AnalysisError.imageConversionFailed
+                }
+                let prompt = nutritionLabelPrompt()
+                let text = try await dispatch(
+                    provider: fallback.provider, model: fallback.model,
+                    baseURL: fallback.baseURL, apiKey: fallback.apiKey,
+                    prompt: prompt, imageData: imageData
+                )
+                return try parseNutritionLabel(from: text)
+            }
+        }
+
+        let prompt = nutritionLabelPrompt()
+        let text = try await callAI(prompt: prompt, image: image)
+        return try parseNutritionLabel(from: text)
+    }
+
+    /// Cloud-tier prompt for nutrition label OCR. Lifted into a helper so the
+    /// FoundationModels fallback path can build the same prompt without duplication.
+    private static func nutritionLabelPrompt() -> String {
+        """
         Read this nutrition label image. Extract the nutritional values per 100g (or per 100ml).
         If the label shows per-serving values, convert them to per-100g using the serving size.
 
@@ -174,8 +206,6 @@ struct GeminiService {
 
         All values should be numbers. If serving size or any nutrient is not available, use null.
         """
-        let text = try await callAI(prompt: prompt, image: image)
-        return try parseNutritionLabel(from: text)
     }
 
     // MARK: - Weight Forecast Insight
