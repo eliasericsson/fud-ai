@@ -26,7 +26,6 @@ import FoundationModels
 /// can invoke during constrained generation.
 @available(iOS 26.0, *)
 struct USDANutritionTool: Tool {
-
     /// Tool identifier the model uses to invoke the call. Spelled with an
     /// underscore (not a hyphen) since some tokenizers split hyphens awkwardly.
     let name = "lookup_usda_nutrition"
@@ -57,17 +56,17 @@ struct USDANutritionTool: Tool {
     }
 
     /// Tool execution. Called synchronously by the FM session during generation;
-    /// the returned `ToolOutput` text is fed back into the model's context window
-    /// so it can decide whether to use the values or call again with a refined query.
-    func call(arguments: Arguments) async throws -> ToolOutput {
+    /// the returned string is fed back into the model's context window so it can
+    /// decide whether to use the values or call again with a refined query.
+    func call(arguments: Arguments) async throws -> String {
         let db = USDAFoodDatabase.shared
         guard db.isAvailable else {
-            return ToolOutput("USDA database is not bundled in this build. Estimate nutrition from your own training knowledge instead.")
+            return "USDA database is not bundled in this build. Estimate nutrition from your own training knowledge instead."
         }
 
         let matches = db.search(query: arguments.foodName, limit: 3)
         guard let best = matches.first else {
-            return ToolOutput("No USDA match found for '\(arguments.foodName)'. Estimate nutrition from your own training knowledge instead.")
+            return "No USDA match found for '\(arguments.foodName)'. Estimate nutrition from your own training knowledge instead."
         }
 
         let scale: Double = (arguments.portionGrams ?? 100) / 100
@@ -75,7 +74,7 @@ struct USDANutritionTool: Tool {
         let alternatives: String = matches.dropFirst().map { "  - \($0.description) (FDC \($0.fdcId))" }.joined(separator: "\n")
         let alternativesBlock: String = alternatives.isEmpty ? "" : "\nOther matches (call again with a more specific name if a different one fits better):\n\(alternatives)"
 
-        return ToolOutput("""
+        return """
         USDA match: \(best.description) (FDC ID: \(best.fdcId))\(best.foodCategory.map { ", category: \($0)" } ?? "")
 
         Values \(portionLabel):
@@ -92,7 +91,7 @@ struct USDANutritionTool: Tool {
         - Cholesterol: \(formatScaled(best.cholesterolMgPer100g, scale: scale, unit: "mg", decimals: 1))
         - Sodium: \(formatScaled(best.sodiumMgPer100g, scale: scale, unit: "mg", decimals: 1))
         - Potassium: \(formatScaled(best.potassiumMgPer100g, scale: scale, unit: "mg", decimals: 1))\(alternativesBlock)
-        """)
+        """
     }
 
     /// Renders an optional Double with the requested scale + decimals, or the
@@ -106,4 +105,23 @@ struct USDANutritionTool: Tool {
         return "\(String(format: format, scaled))\(unit)"
     }
 }
+
+#else
+
+// Fallback for when FoundationModels is not available
+@available(iOS 26.0, *)
+struct USDANutritionTool {
+    let name = "lookup_usda_nutrition"
+    let description = "USDA nutrition lookup tool (FoundationModels not available)"
+    
+    struct Arguments {
+        let foodName: String
+        let portionGrams: Double?
+    }
+    
+    func call(arguments: Arguments) async throws -> String {
+        return "FoundationModels framework not available"
+    }
+}
+
 #endif
