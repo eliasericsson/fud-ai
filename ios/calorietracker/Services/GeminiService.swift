@@ -127,7 +127,59 @@ struct GeminiService {
     }
 
     static func autoAnalyze(image: UIImage) async throws -> FoodAnalysis {
-        let prompt = """
+        if AIProviderSettings.selectedProvider == .foundationModels {
+            do {
+                return try await FoundationModelsService.autoAnalyze(image: image)
+            } catch {
+                guard let fallback = AIProviderSettings.currentFallbackConfig(excludingPrimary: .foundationModels) else {
+                    throw error
+                }
+                guard let imageData = image.jpegData(compressionQuality: 0.8) else {
+                    throw AnalysisError.imageConversionFailed
+                }
+                let prompt = autoAnalyzePrompt()
+                let text = try await dispatch(
+                    provider: fallback.provider, model: fallback.model,
+                    baseURL: fallback.baseURL, apiKey: fallback.apiKey,
+                    prompt: prompt, imageData: imageData
+                )
+                return try parseFoodAnalysis(from: text)
+            }
+        }
+
+        let prompt = autoAnalyzePrompt()
+        let text = try await callAI(prompt: prompt, image: image)
+        return try parseFoodAnalysis(from: text)
+    }
+
+    static func analyzeFood(image: UIImage, description: String? = nil) async throws -> FoodAnalysis {
+        if AIProviderSettings.selectedProvider == .foundationModels {
+            do {
+                return try await FoundationModelsService.analyzeFood(image: image, description: description)
+            } catch {
+                guard let fallback = AIProviderSettings.currentFallbackConfig(excludingPrimary: .foundationModels) else {
+                    throw error
+                }
+                guard let imageData = image.jpegData(compressionQuality: 0.8) else {
+                    throw AnalysisError.imageConversionFailed
+                }
+                let prompt = analyzeFoodPrompt(description: description)
+                let text = try await dispatch(
+                    provider: fallback.provider, model: fallback.model,
+                    baseURL: fallback.baseURL, apiKey: fallback.apiKey,
+                    prompt: prompt, imageData: imageData
+                )
+                return try parseFoodAnalysis(from: text)
+            }
+        }
+
+        let prompt = analyzeFoodPrompt(description: description)
+        let text = try await callAI(prompt: prompt, image: image)
+        return try parseFoodAnalysis(from: text)
+    }
+
+    private static func autoAnalyzePrompt() -> String {
+        """
         Analyze this image. It could be either a photo of food OR a nutrition facts label.
 
         If it's a food photo: identify the food and estimate nutritional content for the serving shown.
@@ -138,11 +190,9 @@ struct GeminiService {
         Calories/protein/carbs/fat are integers. serving_size_grams is the estimated weight in grams of the serving. Micronutrients are numbers (sugar/fiber/sat fat/mono fat/poly fat in grams, cholesterol/sodium/potassium in milligrams).
         Use null for any nutrient you cannot estimate.
         """
-        let text = try await callAI(prompt: prompt, image: image)
-        return try parseFoodAnalysis(from: text)
     }
 
-    static func analyzeFood(image: UIImage, description: String? = nil) async throws -> FoodAnalysis {
+    private static func analyzeFoodPrompt(description: String?) -> String {
         var prompt = """
         Analyze this food image. Identify the food and estimate its nutritional content.
 
@@ -152,13 +202,10 @@ struct GeminiService {
         Calories/protein/carbs/fat are integers. serving_size_grams is the estimated weight in grams of the serving shown. Micronutrients are numbers (sugar/fiber/sat fat/mono fat/poly fat in grams, cholesterol/sodium/potassium in milligrams).
         Give your best estimate for a typical serving size shown in the image. Use null for any nutrient you cannot estimate.
         """
-
         if let description, !description.trimmingCharacters(in: .whitespaces).isEmpty {
             prompt += "\n\nAdditional context from the user about this meal: \(description)\nUse this context to improve accuracy of identification, portion size, and nutrition estimates."
         }
-
-        let text = try await callAI(prompt: prompt, image: image)
-        return try parseFoodAnalysis(from: text)
+        return prompt
     }
 
     static func analyzeNutritionLabel(image: UIImage) async throws -> NutritionLabelAnalysis {
