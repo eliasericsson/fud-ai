@@ -86,7 +86,37 @@ struct GeminiService {
     // MARK: - Public API (unchanged interface)
 
     static func analyzeTextInput(description: String) async throws -> FoodAnalysis {
-        let prompt = """
+        // On-device path: route through FoundationModels when the user picks it as their
+        // primary provider. Constrained decoding via @Generable means we get a typed
+        // struct back — no JSON parser needed. On any FM failure (unavailable hardware,
+        // generation error) we fall back to the cloud path below if a fallback is
+        // configured, otherwise we surface the error.
+        if AIProviderSettings.selectedProvider == .foundationModels {
+            do {
+                return try await FoundationModelsService.analyzeTextInput(description: description)
+            } catch {
+                guard let fallback = AIProviderSettings.currentFallbackConfig(excludingPrimary: .foundationModels) else {
+                    throw error
+                }
+                let prompt = textInputPrompt(description: description)
+                let text = try await dispatch(
+                    provider: fallback.provider, model: fallback.model,
+                    baseURL: fallback.baseURL, apiKey: fallback.apiKey,
+                    prompt: prompt, imageData: nil
+                )
+                return try parseFoodAnalysis(from: text)
+            }
+        }
+
+        let prompt = textInputPrompt(description: description)
+        let text = try await callAI(prompt: prompt, image: nil)
+        return try parseFoodAnalysis(from: text)
+    }
+
+    /// Cloud-tier prompt for text → nutrition. Lifted into a helper so the
+    /// FoundationModels fallback path can build the same prompt without duplication.
+    private static func textInputPrompt(description: String) -> String {
+        """
         Estimate the nutritional content for: \(description)
         Parse any quantities, brands, and multiple items from the text. If a brand is mentioned, use that brand's known nutritional data. If multiple items are described, sum up the total nutrition.
         Respond ONLY with JSON:
@@ -94,8 +124,6 @@ struct GeminiService {
         Calories/protein/carbs/fat are integers. serving_size_grams is the estimated total weight in grams. Micronutrients are numbers (sugar/fiber/sat fat/mono fat/poly fat in grams, cholesterol/sodium/potassium in milligrams).
         Include a single food emoji that best represents the food. Use null for any nutrient you cannot estimate.
         """
-        let text = try await callAI(prompt: prompt, image: nil)
-        return try parseFoodAnalysis(from: text)
     }
 
     static func autoAnalyze(image: UIImage) async throws -> FoodAnalysis {
@@ -263,6 +291,12 @@ struct GeminiService {
 
     private static func dispatch(provider: AIProvider, model: String, baseURL: String, apiKey: String?, prompt: String, imageData: Data?) async throws -> String {
         switch provider.apiFormat {
+        case .foundationModels:
+            // FoundationModels uses constrained decoding on @Generable structs, not free-form text.
+            // Each top-level analysis method routes to FoundationModelsService directly before
+            // reaching here, so this case is only hit when something tries to dispatch FM through
+            // the cloud router (a programmer error). Surface it loudly rather than silently failing.
+            throw AnalysisError.apiError("FoundationModels can't be dispatched through the cloud router. Call FoundationModelsService directly.")
         case .gemini:
             guard let key = apiKey else { throw AnalysisError.noAPIKey }
             return try await callGemini(baseURL: baseURL, model: model, apiKey: key, prompt: prompt, imageData: imageData)

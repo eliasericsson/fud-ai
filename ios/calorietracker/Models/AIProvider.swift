@@ -1,6 +1,11 @@
 import Foundation
 
 enum AIProvider: String, CaseIterable, Codable, Identifiable {
+    /// Apple's on-device FoundationModels framework (iOS 26+, Apple-Intelligence-eligible
+    /// hardware). No API key, no network, no cost. The Settings picker filters this case
+    /// when `FoundationModelsService.isAvailable` is false so users don't pick a
+    /// provider that can't actually run on their device.
+    case foundationModels = "On-Device (Apple Intelligence)"
     case gemini = "Google Gemini"
     case openai = "OpenAI"
     case anthropic = "Anthropic Claude"
@@ -19,37 +24,39 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
 
     var icon: String {
         switch self {
-        case .gemini: "sparkle"
-        case .openai: "brain.head.profile"
-        case .anthropic: "text.bubble"
-        case .xai: "bolt.fill"
-        case .openrouter: "arrow.triangle.branch"
-        case .togetherai: "square.stack.3d.up"
-        case .groq: "hare.fill"
-        case .huggingface: "face.smiling.inverse"
-        case .fireworks: "flame.fill"
-        case .deepinfra: "server.rack"
-        case .mistral: "wind"
-        case .ollama: "desktopcomputer"
-        case .customOpenAI: "wrench.and.screwdriver.fill"
+        case .foundationModels: return "apple.intelligence"
+        case .gemini: return "sparkle"
+        case .openai: return "brain.head.profile"
+        case .anthropic: return "text.bubble"
+        case .xai: return "bolt.fill"
+        case .openrouter: return "arrow.triangle.branch"
+        case .togetherai: return "square.stack.3d.up"
+        case .groq: return "hare.fill"
+        case .huggingface: return "face.smiling.inverse"
+        case .fireworks: return "flame.fill"
+        case .deepinfra: return "server.rack"
+        case .mistral: return "wind"
+        case .ollama: return "desktopcomputer"
+        case .customOpenAI: return "wrench.and.screwdriver.fill"
         }
     }
 
     var baseURL: String {
         switch self {
-        case .gemini: "https://generativelanguage.googleapis.com/v1beta"
-        case .openai: "https://api.openai.com/v1"
-        case .anthropic: "https://api.anthropic.com/v1"
-        case .xai: "https://api.x.ai/v1"
-        case .openrouter: "https://openrouter.ai/api/v1"
-        case .togetherai: "https://api.together.xyz/v1"
-        case .groq: "https://api.groq.com/openai/v1"
-        case .huggingface: "https://router.huggingface.co/v1"
-        case .fireworks: "https://api.fireworks.ai/inference/v1"
-        case .deepinfra: "https://api.deepinfra.com/v1/openai"
-        case .mistral: "https://api.mistral.ai/v1"
-        case .ollama: "http://localhost:11434/v1"
-        case .customOpenAI: ""  // user must supply
+        case .foundationModels: return ""  // on-device, no URL
+        case .gemini: return "https://generativelanguage.googleapis.com/v1beta"
+        case .openai: return "https://api.openai.com/v1"
+        case .anthropic: return "https://api.anthropic.com/v1"
+        case .xai: return "https://api.x.ai/v1"
+        case .openrouter: return "https://openrouter.ai/api/v1"
+        case .togetherai: return "https://api.together.xyz/v1"
+        case .groq: return "https://api.groq.com/openai/v1"
+        case .huggingface: return "https://router.huggingface.co/v1"
+        case .fireworks: return "https://api.fireworks.ai/inference/v1"
+        case .deepinfra: return "https://api.deepinfra.com/v1/openai"
+        case .mistral: return "https://api.mistral.ai/v1"
+        case .ollama: return "http://localhost:11434/v1"
+        case .customOpenAI: return ""  // user must supply
         }
     }
 
@@ -61,6 +68,11 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
     /// Text-only and deprecated/preview models are excluded since this app needs vision for food photos.
     var models: [String] {
         switch self {
+        case .foundationModels: [
+            // FoundationModels exposes a single system model — no per-call selection.
+            // The string is informational; the framework picks the actual model.
+            "system",
+        ]
         case .gemini: [
             "gemini-3.1-flash-lite-preview", // vision, newest, cheapest
             "gemini-3.1-pro-preview",        // vision, newest flagship
@@ -134,7 +146,15 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
     }
 
     var requiresAPIKey: Bool {
-        self != .ollama
+        // foundationModels is on-device, ollama runs on the user's own machine, neither needs a key.
+        self != .ollama && self != .foundationModels
+    }
+
+    /// True when the provider depends on hardware/OS support that may be unavailable
+    /// even with no configuration error. Today this is only `.foundationModels`
+    /// (Apple Intelligence-eligible devices on iOS 26+).
+    var requiresOnDeviceAvailability: Bool {
+        self == .foundationModels
     }
 
     /// True for providers where the user supplies the base URL and model name themselves.
@@ -155,6 +175,9 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
 
     /// API format grouping
     enum APIFormat {
+        /// Apple's on-device FoundationModels framework — uses `LanguageModelSession`
+        /// with `@Generable` constrained decoding, not HTTP.
+        case foundationModels
         case gemini
         case openaiCompatible
         case anthropic
@@ -162,27 +185,29 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
 
     var apiFormat: APIFormat {
         switch self {
-        case .gemini: .gemini
-        case .anthropic: .anthropic
-        case .openai, .xai, .openrouter, .togetherai, .groq, .huggingface, .fireworks, .deepinfra, .mistral, .ollama, .customOpenAI: .openaiCompatible
+        case .foundationModels: return .foundationModels
+        case .gemini: return .gemini
+        case .anthropic: return .anthropic
+        case .openai, .xai, .openrouter, .togetherai, .groq, .huggingface, .fireworks, .deepinfra, .mistral, .ollama, .customOpenAI: return .openaiCompatible
         }
     }
 
     var apiKeyPlaceholder: String {
         switch self {
-        case .gemini: "AIza..."
-        case .openai: "sk-..."
-        case .anthropic: "sk-ant-..."
-        case .xai: "xai-..."
-        case .openrouter: "sk-or-..."
-        case .togetherai: "..."
-        case .groq: "gsk_..."
-        case .huggingface: "hf_..."
-        case .fireworks: "fw_..."
-        case .deepinfra: "..."
-        case .mistral: "..."
-        case .ollama: "No key needed"
-        case .customOpenAI: "API key (or anything if endpoint doesn't need one)"
+        case .foundationModels: return "No key needed (runs on-device)"
+        case .gemini: return "AIza..."
+        case .openai: return "sk-..."
+        case .anthropic: return "sk-ant-..."
+        case .xai: return "xai-..."
+        case .openrouter: return "sk-or-..."
+        case .togetherai: return "..."
+        case .groq: return "gsk_..."
+        case .huggingface: return "hf_..."
+        case .fireworks: return "fw_..."
+        case .deepinfra: return "..."
+        case .mistral: return "..."
+        case .ollama: return "No key needed"
+        case .customOpenAI: return "API key (or anything if endpoint doesn't need one)"
         }
     }
 }
