@@ -61,6 +61,11 @@ struct ChatService {
         }
 
         switch provider.apiFormat {
+        case .foundationModels:
+            // On-device FoundationModels should go through FoundationModelsService,
+            // not the ChatService network layer. This case shouldn't be reached
+            // in normal operation but is included for completeness.
+            throw ChatError.apiError("On-device AI should use FoundationModelsService, not ChatService.")
         case .gemini:
             return try await callGemini(baseURL: baseURL, model: model, systemPrompt: systemPrompt, history: history, newUserMessage: newUserMessage, tools: tools)
         case .anthropic:
