@@ -56,16 +56,19 @@ struct ChatService {
         let model = AIProviderSettings.selectedModel
         let baseURL = AIProviderSettings.currentBaseURL
 
-        guard AIProviderSettings.currentAPIKey != nil || provider == .ollama else {
-            throw ChatError.noAPIKey
+        // FoundationModels runs on-device — no key required, but does need
+        // Apple-Intelligence-eligible hardware. We let the FM call surface its
+        // own .unavailable error rather than gate here, so Settings can show a
+        // helpful message instead of a generic "noAPIKey".
+        if provider != .foundationModels {
+            guard AIProviderSettings.currentAPIKey != nil || provider == .ollama else {
+                throw ChatError.noAPIKey
+            }
         }
 
         switch provider.apiFormat {
         case .foundationModels:
-            // On-device FoundationModels should go through FoundationModelsService,
-            // not the ChatService network layer. This case shouldn't be reached
-            // in normal operation but is included for completeness.
-            throw ChatError.apiError("On-device AI should use FoundationModelsService, not ChatService.")
+            return try await callFoundationModels(systemPrompt: systemPrompt, history: history, newUserMessage: newUserMessage, tools: tools)
         case .gemini:
             return try await callGemini(baseURL: baseURL, model: model, systemPrompt: systemPrompt, history: history, newUserMessage: newUserMessage, tools: tools)
         case .anthropic:
@@ -73,6 +76,67 @@ struct ChatService {
         case .openaiCompatible:
             return try await callOpenAICompatible(baseURL: baseURL, model: model, systemPrompt: systemPrompt, history: history, newUserMessage: newUserMessage, provider: provider, tools: tools)
         }
+    }
+
+    // MARK: - FoundationModels (on-device LanguageModelSession)
+
+    /// On-device chat path. Builds a `LanguageModelSession` with the same
+    /// `CoachTools` exposed as `FoundationModels.Tool` conformances, hands it the
+    /// system prompt as `instructions`, and sends the new user message. Multi-
+    /// turn history is folded into the prompt because `LanguageModelSession`
+    /// builds its transcript via successive `respond()` calls — there's no
+    /// public initializer that accepts a pre-baked transcript yet — and the
+    /// cloud-style "replay assistant turns" pattern doesn't apply when the
+    /// model owns its own state.
+    private static func callFoundationModels(systemPrompt: String, history: [ChatMessage], newUserMessage: String, tools: CoachTools) async throws -> String {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            // Surface a friendlier error if the device doesn't support FM, so the
+            // user gets the "Turn on Apple Intelligence" message instead of a
+            // generic API failure.
+            let availability = FoundationModelsService.availability
+            guard availability.isAvailable else {
+                throw ChatError.apiError(availability.userFacingDescription)
+            }
+
+            let session = LanguageModelSession(
+                tools: CoachFoundationModelsTools.makeAll(executor: tools),
+                instructions: systemPrompt
+            )
+            do {
+                let response = try await session.respond(to: prompt(history: history, newUserMessage: newUserMessage))
+                return response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch {
+                throw ChatError.apiError("On-device chat failed: \(error.localizedDescription)")
+            }
+        } else {
+            throw ChatError.apiError("On-device AI requires iOS 26 or later.")
+        }
+        #else
+        throw ChatError.apiError("FoundationModels framework is not available in this build.")
+        #endif
+    }
+
+    /// Folds multi-turn history into a single user-shaped prompt. The cloud APIs
+    /// each have a native message-array shape; FM doesn't expose one for already-
+    /// completed turns, so we render the conversation as plaintext and ask the
+    /// model to continue. The leading "Conversation so far:" header keeps the
+    /// system instruction's "you are Coach" framing distinct from the replay.
+    private static func prompt(history: [ChatMessage], newUserMessage: String) -> String {
+        guard !history.isEmpty else { return newUserMessage }
+        let lines = history.map { msg in
+            switch msg.role {
+            case .user: return "User: \(msg.content)"
+            case .assistant: return "Coach: \(msg.content)"
+            }
+        }
+        return """
+        Conversation so far:
+        \(lines.joined(separator: "\n"))
+
+        New user message:
+        \(newUserMessage)
+        """
     }
 
     // MARK: - System prompt builder
