@@ -1,6 +1,11 @@
 import Foundation
 
 enum AIProvider: String, CaseIterable, Codable, Identifiable {
+    /// Apple's on-device FoundationModels framework (iOS 26+, Apple-Intelligence-eligible
+    /// hardware). No API key, no network, no cost. The Settings picker filters this case
+    /// when `FoundationModelsService.isAvailable` is false so users don't pick a
+    /// provider that can't actually run on their device.
+    case foundationModels = "On-Device (Apple Intelligence)"
     case gemini = "Google Gemini"
     case openai = "OpenAI"
     case anthropic = "Anthropic Claude"
@@ -19,6 +24,7 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
 
     var icon: String {
         switch self {
+        case .foundationModels: "apple.intelligence"
         case .gemini: "sparkle"
         case .openai: "brain.head.profile"
         case .anthropic: "text.bubble"
@@ -37,6 +43,7 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
 
     var baseURL: String {
         switch self {
+        case .foundationModels: ""  // on-device, no URL
         case .gemini: "https://generativelanguage.googleapis.com/v1beta"
         case .openai: "https://api.openai.com/v1"
         case .anthropic: "https://api.anthropic.com/v1"
@@ -61,6 +68,11 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
     /// Text-only and deprecated/preview models are excluded since this app needs vision for food photos.
     var models: [String] {
         switch self {
+        case .foundationModels: [
+            // FoundationModels exposes a single system model — no per-call selection.
+            // The string is informational; the framework picks the actual model.
+            "system",
+        ]
         case .gemini: [
             "gemini-3.1-flash-lite-preview", // vision, newest, cheapest
             "gemini-3.1-pro-preview",        // vision, newest flagship
@@ -134,7 +146,15 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
     }
 
     var requiresAPIKey: Bool {
-        self != .ollama
+        // foundationModels is on-device, ollama runs on the user's own machine, neither needs a key.
+        self != .ollama && self != .foundationModels
+    }
+
+    /// True when the provider depends on hardware/OS support that may be unavailable
+    /// even with no configuration error. Today this is only `.foundationModels`
+    /// (Apple Intelligence-eligible devices on iOS 26+).
+    var requiresOnDeviceAvailability: Bool {
+        self == .foundationModels
     }
 
     /// True for providers where the user supplies the base URL and model name themselves.
@@ -155,6 +175,9 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
 
     /// API format grouping
     enum APIFormat {
+        /// Apple's on-device FoundationModels framework — uses `LanguageModelSession`
+        /// with `@Generable` constrained decoding, not HTTP.
+        case foundationModels
         case gemini
         case openaiCompatible
         case anthropic
@@ -162,6 +185,7 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
 
     var apiFormat: APIFormat {
         switch self {
+        case .foundationModels: .foundationModels
         case .gemini: .gemini
         case .anthropic: .anthropic
         case .openai, .xai, .openrouter, .togetherai, .groq, .huggingface, .fireworks, .deepinfra, .mistral, .ollama, .customOpenAI: .openaiCompatible
@@ -170,6 +194,7 @@ enum AIProvider: String, CaseIterable, Codable, Identifiable {
 
     var apiKeyPlaceholder: String {
         switch self {
+        case .foundationModels: "No key needed (runs on-device)"
         case .gemini: "AIza..."
         case .openai: "sk-..."
         case .anthropic: "sk-ant-..."

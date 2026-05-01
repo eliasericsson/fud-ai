@@ -137,13 +137,20 @@ enum FoundationModelsService {
     // a future provider-router change can call into either tier identically. They
     // throw `.notImplemented` until each phase lands.
 
-    /// Phase 1 — Text path. Replaces `GeminiService.analyzeTextInput` with a
-    /// `LanguageModelSession.respond(to:generating:)` call against a `@Generable`
-    /// nutrition struct (constrained decoding eliminates the JSON brace-balancing
-    /// parser used by the cloud tier).
+    /// Phase 1 — Text path. Uses `LanguageModelSession.respond(to:generating:)` with a
+    /// `@Generable` nutrition struct so the model is forced at the token level to emit
+    /// fields matching our schema (no JSON parser, no brace-balancing, no markdown fence
+    /// stripping). Falls back to cloud is handled in `GeminiService.analyzeTextInput`.
     static func analyzeTextInput(description: String) async throws -> GeminiService.FoodAnalysis {
         try ensureAvailable()
-        throw AnalysisError.notImplemented(phase: "Phase 1 — Text path")
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            return try await TextPath.analyze(description: description)
+        }
+        #endif
+        // Should be unreachable after `ensureAvailable()` — the availability check returns
+        // `.unavailableUnsupportedOS` on anything pre-iOS 26 and we'd have thrown above.
+        throw AnalysisError.unavailable(.unavailableUnsupportedOS)
     }
 
     /// Phase 4 — Vision multimodal. Will accept a `UIImage` directly (the
@@ -173,3 +180,121 @@ enum FoundationModelsService {
         }
     }
 }
+
+// MARK: - Phase 1: Text path implementation
+
+#if canImport(FoundationModels)
+@available(iOS 26.0, *)
+private enum TextPath {
+
+    /// Generation schema for nutrition estimation from a free-form text description.
+    /// Field names are deliberately verbose so the model picks the right unit (e.g.
+    /// `sugarGrams` vs `cholesterolMilligrams`) without us having to post-process.
+    /// The macro layout matches `GeminiService.FoodAnalysis` so mapping is a 1:1 copy.
+    @Generable
+    struct NutritionEstimate {
+        @Guide(description: "Common name of the food, e.g. 'Chicken Caesar Salad' or 'Chipotle Burrito Bowl'.")
+        let name: String
+
+        @Guide(description: "Total calories for the described serving (whole number).")
+        let calories: Int
+
+        @Guide(description: "Total protein in grams for the described serving (whole number).")
+        let proteinGrams: Int
+
+        @Guide(description: "Total carbohydrates in grams for the described serving (whole number).")
+        let carbsGrams: Int
+
+        @Guide(description: "Total fat in grams for the described serving (whole number).")
+        let fatGrams: Int
+
+        @Guide(description: "Estimated total weight of the described portion in grams.")
+        let servingSizeGrams: Double
+
+        @Guide(description: "A single food emoji that best represents this food, e.g. 🥗 or 🍕.")
+        let emoji: String
+
+        @Guide(description: "Total sugar in grams. Omit if not estimable.")
+        let sugarGrams: Double?
+
+        @Guide(description: "Added sugar in grams (excludes naturally occurring sugars). Omit if not estimable.")
+        let addedSugarGrams: Double?
+
+        @Guide(description: "Dietary fiber in grams. Omit if not estimable.")
+        let fiberGrams: Double?
+
+        @Guide(description: "Saturated fat in grams. Omit if not estimable.")
+        let saturatedFatGrams: Double?
+
+        @Guide(description: "Monounsaturated fat in grams. Omit if not estimable.")
+        let monounsaturatedFatGrams: Double?
+
+        @Guide(description: "Polyunsaturated fat in grams. Omit if not estimable.")
+        let polyunsaturatedFatGrams: Double?
+
+        @Guide(description: "Cholesterol in milligrams. Omit if not estimable.")
+        let cholesterolMilligrams: Double?
+
+        @Guide(description: "Sodium in milligrams. Omit if not estimable.")
+        let sodiumMilligrams: Double?
+
+        @Guide(description: "Potassium in milligrams. Omit if not estimable.")
+        let potassiumMilligrams: Double?
+    }
+
+    static func analyze(description: String) async throws -> GeminiService.FoodAnalysis {
+        let session = LanguageModelSession(instructions: Self.systemInstructions())
+        do {
+            let response = try await session.respond(
+                to: prompt(description: description),
+                generating: NutritionEstimate.self
+            )
+            return mapToFoodAnalysis(response.content)
+        } catch {
+            throw FoundationModelsService.AnalysisError.generationFailed(error)
+        }
+    }
+
+    /// Builds the system instruction prepended to every text-path session. Always includes
+    /// the nutrition coach framing; appends the user's free-form `userContext` from
+    /// Settings when set (matches the cloud tier's behaviour at AIProvider.swift's
+    /// system-instruction injection points).
+    private static func systemInstructions() -> String {
+        let base = """
+        You are a nutrition expert helping a calorie tracking app. Estimate nutritional content for the food the user describes. Use ranges typical of the portion size implied by the description. If a brand name is given, use that brand's known values. If multiple items are described, sum their totals. Round whole-gram macros to the nearest gram. Use the units stated in each field's description (grams vs. milligrams).
+        """
+        if let userContext = AIProviderSettings.currentUserContext {
+            return base + "\n\nAdditional user context (apply when relevant):\n" + userContext
+        }
+        return base
+    }
+
+    private static func prompt(description: String) -> String {
+        "Estimate nutrition for: \(description)"
+    }
+
+    /// Adapts the on-device schema into the cloud-shape `FoodAnalysis` struct that the
+    /// rest of the app already speaks. Keeping a single public shape means views,
+    /// FoodEntry mapping, and HealthKit writes don't care which tier produced the data.
+    private static func mapToFoodAnalysis(_ estimate: NutritionEstimate) -> GeminiService.FoodAnalysis {
+        GeminiService.FoodAnalysis(
+            name: estimate.name,
+            calories: estimate.calories,
+            protein: estimate.proteinGrams,
+            carbs: estimate.carbsGrams,
+            fat: estimate.fatGrams,
+            servingSizeGrams: estimate.servingSizeGrams,
+            emoji: estimate.emoji,
+            sugar: estimate.sugarGrams,
+            addedSugar: estimate.addedSugarGrams,
+            fiber: estimate.fiberGrams,
+            saturatedFat: estimate.saturatedFatGrams,
+            monounsaturatedFat: estimate.monounsaturatedFatGrams,
+            polyunsaturatedFat: estimate.polyunsaturatedFatGrams,
+            cholesterol: estimate.cholesterolMilligrams,
+            sodium: estimate.sodiumMilligrams,
+            potassium: estimate.potassiumMilligrams
+        )
+    }
+}
+#endif
