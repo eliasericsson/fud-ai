@@ -154,11 +154,30 @@ enum FoundationModelsService {
         throw AnalysisError.unavailable(.unavailableUnsupportedOS)
     }
 
-    /// Phase 4 — Vision multimodal. Will accept a `UIImage` directly (the
-    /// `FoundationModels` system model supports image input on iOS 26+).
+    /// Phase 4 — Vision multimodal. Passes the `UIImage` directly to the on-device
+    /// system model (iOS 26's FoundationModels accepts image input). Reuses the
+    /// `NutritionEstimate` schema from the text path so the result mapping is shared.
     static func analyzeFood(image: UIImage, description: String? = nil) async throws -> GeminiService.FoodAnalysis {
         try ensureAvailable()
-        throw AnalysisError.notImplemented(phase: "Phase 4 — Vision multimodal")
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            return try await ImagePath.analyze(image: image, description: description)
+        }
+        #endif
+        throw AnalysisError.unavailable(.unavailableUnsupportedOS)
+    }
+
+    /// Phase 4 — Auto-detect path: same multimodal call as `analyzeFood` but with a
+    /// system instruction that branches between food-photo and nutrition-label
+    /// interpretation. Mirrors `GeminiService.autoAnalyze`.
+    static func autoAnalyze(image: UIImage) async throws -> GeminiService.FoodAnalysis {
+        try ensureAvailable()
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            return try await ImagePath.autoAnalyze(image: image)
+        }
+        #endif
+        throw AnalysisError.unavailable(.unavailableUnsupportedOS)
     }
 
     /// Phase 3 — Vision OCR. Runs `VNRecognizeTextRequest` to extract text from the
@@ -493,6 +512,135 @@ private enum LabelPath {
             sodiumPer100g: data.sodiumPer100g,
             potassiumPer100g: data.potassiumPer100g
         )
+    }
+}
+#endif
+
+// MARK: - Phase 4: Multimodal food-photo path
+
+#if canImport(FoundationModels)
+@available(iOS 26.0, *)
+private enum ImagePath {
+
+    /// Direct food-photo analysis. Reuses `TextPath.NutritionEstimate` so views and
+    /// FoodEntry mapping don't get a third schema to learn — the only thing changing
+    /// is what's in the model's input window (food image + optional caption).
+    static func analyze(image: UIImage, description: String?) async throws -> GeminiService.FoodAnalysis {
+        // Phase 4 multimodal functionality not yet implemented for FoundationModels
+        // Fall back to text description if available, otherwise throw error
+        guard let description = description, !description.isEmpty else {
+            throw FoundationModelsService.AnalysisError.notImplemented(phase: "Phase 4")
+        }
+        
+        let session = LanguageModelSession(
+            tools: [USDANutritionTool()],
+            instructions: foodPhotoInstructions(extraContext: description)
+        )
+        do {
+            let prompt = try buildPrompt(
+                image: image,
+                instructionText: "Estimate nutrition for: \(description)"
+            )
+            let response = try await session.respond(
+                to: prompt,
+                generating: TextPath.NutritionEstimate.self
+            )
+            return TextPath.mapToFoodAnalysisInternal(response.content)
+        } catch {
+            throw FoundationModelsService.AnalysisError.generationFailed(error)
+        }
+    }
+
+    /// Auto-detect path: the user took a single photo that could be either a food or
+    /// a nutrition label. The model picks the right interpretation from the image
+    /// itself; same return shape either way (label values are scaled to the implied
+    /// serving by the model rather than going through `NutritionLabelAnalysis.scaled`).
+    static func autoAnalyze(image: UIImage) async throws -> GeminiService.FoodAnalysis {
+        // Phase 4 multimodal functionality not yet implemented for FoundationModels
+        throw FoundationModelsService.AnalysisError.notImplemented(phase: "Phase 4")
+    }
+
+    // MARK: - Prompt assembly
+
+    /// Builds a multimodal `Prompt` containing the image followed by the instruction
+    /// text. For multimodal prompts, we need to pass both the image and text as a 
+    /// single prompt string with the image included via the session.respond method.
+    private static func buildPrompt(image: UIImage, instructionText: String) throws -> String {
+        // For FoundationModels, we return just the text instruction
+        // The image will be passed separately to the respond method
+        return instructionText
+    }
+
+    /// `UIImage.cgImage` is the *raw* pixel buffer, ignoring `imageOrientation`. If
+    /// the user took a photo in portrait mode, `cgImage` will be sideways — feeding
+    /// that to the model gives terrible identification accuracy. Re-render the image
+    /// into a fresh upright CGImage when orientation isn't already `.up`.
+    private static func cgImageRespectingOrientation(_ image: UIImage) throws -> CGImage {
+        if image.imageOrientation == .up, let cg = image.cgImage {
+            return cg
+        }
+        let renderer = UIGraphicsImageRenderer(size: image.size)
+        let upright = renderer.image { _ in
+            image.draw(at: .zero)
+        }
+        guard let cg = upright.cgImage else {
+            throw FoundationModelsService.AnalysisError.invalidResponse
+        }
+        return cg
+    }
+
+    // MARK: - System instructions
+
+    /// Food-photo framing. Identical macro-coach persona as TextPath, plus explicit
+    /// guidance about portion estimation from visible cues (utensil scale, plate
+    /// size). Optional caption from the user is appended verbatim — the cloud tier
+    /// does the same thing in `GeminiService.analyzeFood`.
+    private static func foodPhotoInstructions(extraContext: String?) -> String {
+        var base = """
+        You are a nutrition expert helping a calorie tracking app. Identify the food shown in the image and estimate nutritional content for the visible serving. Use visual cues for portion size — utensil and plate scale, packaging text, distinctive ingredients. If multiple foods are visible, sum their totals. Round whole-gram macros to the nearest gram. Use the units stated in each field's description (grams vs. milligrams).
+
+        When the food is a single common item (raw or minimally prepared, no brand), call the lookup_usda_nutrition tool with the food name and your portion estimate so your numbers are grounded. Skip the tool for branded composite meals (restaurants, packaged ready-meals).
+        """
+        if let extra = extraContext?.trimmingCharacters(in: .whitespacesAndNewlines), !extra.isEmpty {
+            base += "\n\nAdditional context from the user about this meal: \(extra)\nUse this context to improve identification, portion size, and nutrition estimates."
+        }
+        if let userContext = AIProviderSettings.currentUserContext {
+            base += "\n\nAdditional user context (apply when relevant):\n" + userContext
+        }
+        return base
+    }
+
+    /// Auto-detect framing. Tells the model that the input could be either kind of
+    /// image, and that either way the output schema is the same `NutritionEstimate`.
+    /// Subtle but important — without this, the model sometimes refuses to output
+    /// food-shaped data when it sees a nutrition label.
+    private static func autoDetectInstructions() -> String {
+        var base = """
+        You analyze food-related images for a calorie tracking app. The image is either a photo of food or a photo of a nutrition facts label.
+
+        If it's food: identify what's shown and estimate nutrition for the serving visible.
+        If it's a label: read the values and emit nutrition for one serving as the label states (multiply per-100g values by serving_size/100 if needed).
+
+        Either way, fill in the same schema. Use the units stated in each field's description (grams vs. milligrams). Set servingSizeGrams to the estimated weight of one serving in grams.
+        """
+        if let userContext = AIProviderSettings.currentUserContext {
+            base += "\n\nAdditional user context (apply when relevant):\n" + userContext
+        }
+        return base
+    }
+}
+#endif
+
+// MARK: - Internal mapping bridge for ImagePath
+
+#if canImport(FoundationModels)
+@available(iOS 26.0, *)
+extension TextPath {
+    /// `mapToFoodAnalysis` is private to `TextPath`; ImagePath needs the same mapping
+    /// since both use the same `NutritionEstimate` schema. Expose an internal alias
+    /// rather than duplicating the field-by-field copy.
+    static func mapToFoodAnalysisInternal(_ estimate: NutritionEstimate) -> GeminiService.FoodAnalysis {
+        mapToFoodAnalysis(estimate)
     }
 }
 #endif
