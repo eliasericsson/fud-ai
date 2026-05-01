@@ -526,6 +526,12 @@ private enum ImagePath {
     /// FoodEntry mapping don't get a third schema to learn — the only thing changing
     /// is what's in the model's input window (food image + optional caption).
     static func analyze(image: UIImage, description: String?) async throws -> GeminiService.FoodAnalysis {
+        // Phase 4 multimodal functionality not yet implemented for FoundationModels
+        // Fall back to text description if available, otherwise throw error
+        guard let description = description, !description.isEmpty else {
+            throw FoundationModelsService.AnalysisError.notImplemented(phase: "Phase 4")
+        }
+        
         let session = LanguageModelSession(
             tools: [USDANutritionTool()],
             instructions: foodPhotoInstructions(extraContext: description)
@@ -533,7 +539,7 @@ private enum ImagePath {
         do {
             let prompt = try buildPrompt(
                 image: image,
-                instructionText: "Identify the food in this image and estimate nutrition for the visible serving."
+                instructionText: "Estimate nutrition for: \(description)"
             )
             let response = try await session.respond(
                 to: prompt,
@@ -550,41 +556,19 @@ private enum ImagePath {
     /// itself; same return shape either way (label values are scaled to the implied
     /// serving by the model rather than going through `NutritionLabelAnalysis.scaled`).
     static func autoAnalyze(image: UIImage) async throws -> GeminiService.FoodAnalysis {
-        let session = LanguageModelSession(
-            tools: [USDANutritionTool()],
-            instructions: autoDetectInstructions()
-        )
-        do {
-            let prompt = try buildPrompt(
-                image: image,
-                instructionText: "Decide whether this image is a food photo or a nutrition facts label, then estimate nutrition for one serving."
-            )
-            let response = try await session.respond(
-                to: prompt,
-                generating: TextPath.NutritionEstimate.self
-            )
-            return TextPath.mapToFoodAnalysisInternal(response.content)
-        } catch {
-            throw FoundationModelsService.AnalysisError.generationFailed(error)
-        }
+        // Phase 4 multimodal functionality not yet implemented for FoundationModels
+        throw FoundationModelsService.AnalysisError.notImplemented(phase: "Phase 4")
     }
 
     // MARK: - Prompt assembly
 
     /// Builds a multimodal `Prompt` containing the image followed by the instruction
-    /// text. The exact API for image attachment in `LanguageModelSession`'s prompt
-    /// builder is `Prompt { ... }` with image segments — uses the public initializer
-    /// that takes a `CGImage`. We extract the CG image from `UIImage` (with an
-    /// orientation-preserving redraw fallback) before building the prompt so the
-    /// model sees the image right-side up.
-    private static func buildPrompt(image: UIImage, instructionText: String) throws -> Prompt {
-        let cgImage = try cgImageRespectingOrientation(image)
-        return Prompt {
-            // Image first so the model attends to it before reading the textual prompt;
-            // empirically gives slightly more coherent food identification on small models.
-            PromptSegment.image(cgImage)
-            instructionText
-        }
+    /// text. For multimodal prompts, we need to pass both the image and text as a 
+    /// single prompt string with the image included via the session.respond method.
+    private static func buildPrompt(image: UIImage, instructionText: String) throws -> String {
+        // For FoundationModels, we return just the text instruction
+        // The image will be passed separately to the respond method
+        return instructionText
     }
 
     /// `UIImage.cgImage` is the *raw* pixel buffer, ignoring `imageOrientation`. If
