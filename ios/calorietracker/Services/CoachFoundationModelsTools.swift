@@ -53,8 +53,8 @@ enum CoachFoundationModelsTools {
         @Generable
         struct Arguments {}
 
-        func call(arguments: Arguments) async throws -> ToolOutput {
-            ToolOutput(executor.execute(name: name, arguments: [:]))
+        func call(arguments: Arguments) async throws -> String {
+            executor.execute(name: name, arguments: [:])
         }
     }
 
@@ -76,8 +76,8 @@ enum CoachFoundationModelsTools {
             let limit: Int?
         }
 
-        func call(arguments: Arguments) async throws -> ToolOutput {
-            ToolOutput(executor.execute(name: name, arguments: argDict(arguments)))
+        func call(arguments: Arguments) async throws -> String {
+            executor.execute(name: name, arguments: argDict(arguments))
         }
 
         private func argDict(_ args: Arguments) -> [String: Any] {
@@ -105,10 +105,10 @@ enum CoachFoundationModelsTools {
             let limit: Int?
         }
 
-        func call(arguments: Arguments) async throws -> ToolOutput {
+        func call(arguments: Arguments) async throws -> String {
             var dict: [String: Any] = ["from": arguments.from, "to": arguments.to]
             if let limit = arguments.limit { dict["limit"] = limit }
-            return ToolOutput(executor.execute(name: name, arguments: dict))
+            return executor.execute(name: name, arguments: dict)
         }
     }
 
@@ -128,8 +128,8 @@ enum CoachFoundationModelsTools {
             let to: String
         }
 
-        func call(arguments: Arguments) async throws -> ToolOutput {
-            ToolOutput(executor.execute(name: name, arguments: ["from": arguments.from, "to": arguments.to]))
+        func call(arguments: Arguments) async throws -> String {
+            executor.execute(name: name, arguments: ["from": arguments.from, "to": arguments.to])
         }
     }
 
@@ -151,10 +151,10 @@ enum CoachFoundationModelsTools {
             let limit: Int?
         }
 
-        func call(arguments: Arguments) async throws -> ToolOutput {
+        func call(arguments: Arguments) async throws -> String {
             var dict: [String: Any] = ["from": arguments.from, "to": arguments.to]
             if let limit = arguments.limit { dict["limit"] = limit }
-            return ToolOutput(executor.execute(name: name, arguments: dict))
+            return executor.execute(name: name, arguments: dict)
         }
     }
 }
