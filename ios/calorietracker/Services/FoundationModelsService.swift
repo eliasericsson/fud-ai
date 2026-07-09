@@ -19,6 +19,7 @@
 
 import Foundation
 import UIKit
+import Vision
 
 #if canImport(FoundationModels)
 import FoundationModels
@@ -160,12 +161,19 @@ enum FoundationModelsService {
         throw AnalysisError.notImplemented(phase: "Phase 4 — Vision multimodal")
     }
 
-    /// Phase 3 — Vision OCR. Will run `VNRecognizeTextRequest` and pipe the
-    /// extracted text into a `LanguageModelSession` with a `@Generable
-    /// NutritionLabelAnalysis` schema for deterministic parsing.
+    /// Phase 3 — Vision OCR. Runs `VNRecognizeTextRequest` to extract text from the
+    /// label image, then feeds the text into a `LanguageModelSession` with a
+    /// `@Generable NutritionLabelAnalysis` schema for deterministic parsing
+    /// (constrained decoding eliminates the brace-balancing JSON parser the cloud
+    /// tier needs).
     static func analyzeNutritionLabel(image: UIImage) async throws -> GeminiService.NutritionLabelAnalysis {
         try ensureAvailable()
-        throw AnalysisError.notImplemented(phase: "Phase 3 — Vision OCR")
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            return try await LabelPath.analyze(image: image)
+        }
+        #endif
+        throw AnalysisError.unavailable(.unavailableUnsupportedOS)
     }
 
     // MARK: - Helpers
@@ -305,6 +313,185 @@ private enum TextPath {
             cholesterol: estimate.cholesterolMilligrams,
             sodium: estimate.sodiumMilligrams,
             potassium: estimate.potassiumMilligrams
+        )
+    }
+}
+#endif
+
+// MARK: - Phase 3: Vision OCR + label parsing
+
+#if canImport(FoundationModels)
+@available(iOS 26.0, *)
+private enum LabelPath {
+
+    /// Generation schema for nutrition-label parsing. Per-100g/-100ml only; if the
+    /// label only shows per-serving, the model is instructed to convert. Mirrors
+    /// `GeminiService.NutritionLabelAnalysis` 1:1 so `scaled(to:)` keeps working.
+    @Generable
+    struct LabelData {
+        @Guide(description: "Product or brand name as visible on the package. If no name is visible, describe the food type ('Protein Bar', 'Yogurt').")
+        let productName: String
+
+        @Guide(description: "Calories per 100g (or per 100ml for liquids). Convert from per-serving if the label only shows that.")
+        let caloriesPer100g: Double
+
+        @Guide(description: "Protein grams per 100g.")
+        let proteinPer100g: Double
+
+        @Guide(description: "Carbohydrates in grams per 100g.")
+        let carbsPer100g: Double
+
+        @Guide(description: "Total fat in grams per 100g.")
+        let fatPer100g: Double
+
+        @Guide(description: "Serving size in grams as printed on the label. Omit if the label doesn't state it.")
+        let servingSizeGrams: Double?
+
+        @Guide(description: "Sugar in grams per 100g. Omit if not on the label.")
+        let sugarPer100g: Double?
+
+        @Guide(description: "Added sugar in grams per 100g. Omit if not on the label.")
+        let addedSugarPer100g: Double?
+
+        @Guide(description: "Fiber in grams per 100g. Omit if not on the label.")
+        let fiberPer100g: Double?
+
+        @Guide(description: "Saturated fat in grams per 100g. Omit if not on the label.")
+        let saturatedFatPer100g: Double?
+
+        @Guide(description: "Monounsaturated fat in grams per 100g. Omit if not on the label.")
+        let monounsaturatedFatPer100g: Double?
+
+        @Guide(description: "Polyunsaturated fat in grams per 100g. Omit if not on the label.")
+        let polyunsaturatedFatPer100g: Double?
+
+        @Guide(description: "Cholesterol in milligrams per 100g. Omit if not on the label.")
+        let cholesterolPer100g: Double?
+
+        @Guide(description: "Sodium in milligrams per 100g. Omit if not on the label.")
+        let sodiumPer100g: Double?
+
+        @Guide(description: "Potassium in milligrams per 100g. Omit if not on the label.")
+        let potassiumPer100g: Double?
+    }
+
+    /// End-to-end pipeline: image → OCR → FM → typed struct. Both stages can fail;
+    /// errors are wrapped as `FoundationModelsService.AnalysisError` so the caller
+    /// can decide whether to fall back to cloud (handled in `GeminiService`).
+    static func analyze(image: UIImage) async throws -> GeminiService.NutritionLabelAnalysis {
+        let recognizedText = try await recognizeText(in: image)
+        guard !recognizedText.isEmpty else {
+            throw FoundationModelsService.AnalysisError.invalidResponse
+        }
+
+        let session = LanguageModelSession(instructions: systemInstructions())
+        do {
+            let response = try await session.respond(
+                to: prompt(ocrText: recognizedText),
+                generating: LabelData.self
+            )
+            return mapToLabelAnalysis(response.content)
+        } catch {
+            throw FoundationModelsService.AnalysisError.generationFailed(error)
+        }
+    }
+
+    // MARK: - Vision OCR
+
+    /// Runs `VNRecognizeTextRequest` over the image and joins recognized lines into
+    /// a single string. The recognition level is `.accurate` since labels often have
+    /// small print and we'd rather pay the latency than miss "trans fat" or "sodium".
+    /// Language correction is OFF — nutrition labels use specialized vocabulary
+    /// ("polyunsaturated", brand names) that the system dictionary often mangles.
+    private static func recognizeText(in image: UIImage) async throws -> String {
+        guard let cgImage = image.cgImage else {
+            throw FoundationModelsService.AnalysisError.invalidResponse
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let request = VNRecognizeTextRequest { request, error in
+                if let error {
+                    continuation.resume(throwing: FoundationModelsService.AnalysisError.generationFailed(error))
+                    return
+                }
+                let observations = request.results as? [VNRecognizedTextObservation] ?? []
+                // topCandidates(1) gives the highest-confidence transcription per region.
+                // Joining with newlines preserves the natural line layout the LLM uses
+                // to pair "Protein" with its adjacent "25g" value.
+                let lines = observations.compactMap { $0.topCandidates(1).first?.string }
+                continuation.resume(returning: lines.joined(separator: "\n"))
+            }
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = false
+            // Recognize US English by default; Vision auto-detects scripts so no need to
+            // enumerate every language. Apps shipping localized markets can extend this.
+            request.recognitionLanguages = ["en-US"]
+
+            let handler = VNImageRequestHandler(cgImage: cgImage, orientation: cgOrientation(for: image.imageOrientation))
+            do {
+                try handler.perform([request])
+            } catch {
+                continuation.resume(throwing: FoundationModelsService.AnalysisError.generationFailed(error))
+            }
+        }
+    }
+
+    /// UIImage exposes orientation as `UIImage.Orientation`; Vision wants a
+    /// `CGImagePropertyOrientation`. The mapping is fixed and well-known but
+    /// not in any standard library, so we keep the table local.
+    private static func cgOrientation(for orientation: UIImage.Orientation) -> CGImagePropertyOrientation {
+        switch orientation {
+        case .up: return .up
+        case .upMirrored: return .upMirrored
+        case .down: return .down
+        case .downMirrored: return .downMirrored
+        case .left: return .left
+        case .leftMirrored: return .leftMirrored
+        case .right: return .right
+        case .rightMirrored: return .rightMirrored
+        @unknown default: return .up
+        }
+    }
+
+    // MARK: - System instruction + prompt
+
+    private static func systemInstructions() -> String {
+        let base = """
+        You parse nutrition facts panels into a structured per-100g schema. The user gives you raw OCR output from a photo of a label — text may be mis-ordered, missing punctuation, or contain unrelated package text. Pull out the nutrition values and convert to per-100g if the label only shows per-serving (multiply per-serving values by 100/serving_size_grams). Use null for any field not visible on the label rather than guessing. The serving_size_grams field stores the label's own stated serving size (not 100); leave it null if the label doesn't state it.
+        """
+        if let userContext = AIProviderSettings.currentUserContext {
+            return base + "\n\nAdditional user context (apply when relevant):\n" + userContext
+        }
+        return base
+    }
+
+    private static func prompt(ocrText: String) -> String {
+        """
+        Parse the nutrition facts from this OCR output:
+
+        \(ocrText)
+        """
+    }
+
+    // MARK: - Mapping back to the cloud-shape struct
+
+    private static func mapToLabelAnalysis(_ data: LabelData) -> GeminiService.NutritionLabelAnalysis {
+        GeminiService.NutritionLabelAnalysis(
+            name: data.productName,
+            caloriesPer100g: data.caloriesPer100g,
+            proteinPer100g: data.proteinPer100g,
+            carbsPer100g: data.carbsPer100g,
+            fatPer100g: data.fatPer100g,
+            servingSizeGrams: data.servingSizeGrams,
+            sugarPer100g: data.sugarPer100g,
+            addedSugarPer100g: data.addedSugarPer100g,
+            fiberPer100g: data.fiberPer100g,
+            saturatedFatPer100g: data.saturatedFatPer100g,
+            monounsaturatedFatPer100g: data.monounsaturatedFatPer100g,
+            polyunsaturatedFatPer100g: data.polyunsaturatedFatPer100g,
+            cholesterolPer100g: data.cholesterolPer100g,
+            sodiumPer100g: data.sodiumPer100g,
+            potassiumPer100g: data.potassiumPer100g
         )
     }
 }
